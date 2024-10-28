@@ -33,6 +33,8 @@ Add the following variables to the .env file, replacing placeholders with your a
   TTV_CLIENT_ID=<Your Twitch Client ID>
   TTV_CLIENT_SECRET=<Your Twitch Client Secret>
   ````
+  How to get discord token -> https://www.writebots.com/discord-bot-token/
+  How to get Twitch API keys -> https://support.streamweasels.com/article/12-how-to-setup-a-client-id-and-client-secret
 
 **Install FFmpeg:**
 
