@@ -10,8 +10,6 @@ import asyncio
 from urllib.parse import quote
 # Discord token
 TOKEN = config('BOT_TOKEN')
-
-# Twitch tokens
 client_id = config('TTV_CLIENT_ID')
 client_secret = config('TTV_CLIENT_SECRET')
 
@@ -156,8 +154,7 @@ def download(clip_id):
 
     return (filename, f"{clip_info['broadcaster_name']} - {clip_info['title']}")
 
-TARGET_SIZE_MB = 23
-BITRATE_CALC_FACTOR = 8 * TARGET_SIZE_MB
+
 
 async def get_video_duration(file):
     proc = await asyncio.create_subprocess_exec(
@@ -169,37 +166,64 @@ async def get_video_duration(file):
     duration = float(data['format']['duration'])
     return duration
 
-async def transcode(file):
-    duration = await get_video_duration(file)
-    bitrate = (BITRATE_CALC_FACTOR / duration)  # in Mbps
+TARGET_SIZE_MB = 23
+BITRATE_CALC_FACTOR = 8 * TARGET_SIZE_MB
 
-    print(f"Transcoding video file at {bitrate}Mbps")
+# Function to get video duration using FFmpeg
+async def get_video_duration(file):
     process = await asyncio.create_subprocess_exec(
-        'ffmpeg', '-y', '-i', f'{file}', '-c:v', 'libx264', '-b:v', f'{bitrate}M', f'{file}.transcode.mp4',
+        'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1', file,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE)
 
     stdout, stderr = await process.communicate()
 
     if process.returncode != 0:
-        print(f"An error occurred: {stderr.decode()}")
+        raise Exception(f"Error retrieving video duration: {stderr.decode()}")
+
+    return float(stdout.decode().strip())
+
+# Transcoding function with dynamic file size
+async def transcode(file, boost_level):
+    max_size = get_max_file_size(boost_level)
+    target_size_mb = max_size / (1024 * 1024)  # Convert bytes to MB
+    bitrate_calc_factor = 8 * target_size_mb
+
+    duration = await get_video_duration(file)
+    bitrate = (bitrate_calc_factor / duration)  # in Mbps
+
+    print(f"Transcoding video file at {bitrate:.2f} Mbps")
+    process = await asyncio.create_subprocess_exec(
+        'ffmpeg', '-y', '-i', file, '-c:v', 'libx264', '-b:v', f'{bitrate}M', f'{file}.transcode.mp4',
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE)
+
+    stdout, stderr = await process.communicate()
+
+    if process.returncode != 0:
+        print(f"An error occurred during transcoding: {stderr.decode()}")
+        return None
     else:
         print("Transcoding completed successfully.")
+        return f'{file}.transcode.mp4'
 
-
-async def recontainerize(file):
+# Recontainerizing function with dynamic file size
+async def recontainerize(file, boost_level):
     print("Recontainerizing video file")
     process = await asyncio.create_subprocess_exec(
-        'ffmpeg', '-y', '-i', f'{file}', f'{file}.transcode.mp4', '-codec', 'copy',
+        'ffmpeg', '-y', '-i', file, f'{file}.transcode.mp4', '-codec', 'copy',
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE)
 
     stdout, stderr = await process.communicate()
 
     if process.returncode != 0:
-        print(f"An error occurred: {stderr.decode()}")
+        print(f"An error occurred during recontainerizing: {stderr.decode()}")
+        return None
     else:
-        print("Transcoding completed successfully.")
+        print("Recontainerizing completed successfully.")
+        return f'{file}.transcode.mp4'
 
 def download_streamable(slug):
     url = f"https://api.streamable.com/videos/{slug}"
@@ -216,6 +240,15 @@ def download_streamable(slug):
     else:
         print("Error getting clip info:", response.text)
         return (None, None)
+
+def get_max_file_size(boost_level):
+    size_limits = {
+        0: 8 * 1024 * 1024,
+        1: 8 * 1024 * 1024,
+        2: 50 * 1024 * 1024,
+        3: 100 * 1024 * 1024,
+    }
+    return size_limits.get(boost_level, 8 * 1024 * 1024)
 
 class MyClient(discord.Client):
     mobius_counter = 0
@@ -262,7 +295,15 @@ class MyClient(discord.Client):
 
                 print(f"\ttitle: {title}")
 
-                if file_size > 24 * 1024 * 1024:
+                guild = message.guild
+
+                if not guild:
+                    await message.channel.send("This command must be used in a server.")
+                    return
+                boost_level = guild.premium_tier
+                max_size = get_max_file_size(boost_level)
+
+                if file_size > max_size:
                     await message.channel.send("Video is too large to send, attempting to shrink it - this might take a moment. Please wait.")
                     print("Transcoding Twitch video file")
                     await transcode(file)  # Ensure transcode is properly defined in your context
@@ -320,9 +361,15 @@ class MyClient(discord.Client):
 
                 print(f"\ttitle: {title}")
 
+                guild = message.guild
 
+                if not guild:
+                    await message.channel.send("This command must be used in a server.")
+                    return
+                boost_level = guild.premium_tier
+                max_size = get_max_file_size(boost_level)
 
-                if file_size > 24 * 1024 * 1024:
+                if file_size > max_size:
                     await message.channel.send("Video is too large to send, attempting to shrink it - this might take a moment. Please wait.")
                     print("Transcoding Twitch video file")
                     await transcode(file)  # Ensure transcode is properly defined in your context
@@ -380,6 +427,33 @@ class MyClient(discord.Client):
                 should_remove_embeds = True
 
                 os.remove(file)
+
+        # Pattern for Instagram URLs
+        pattern_instagram = r"https://(?:www\.)?instagram\.com/p/[A-Za-z0-9_\-]+/\?igsh=[A-Za-z0-9_\-]+"
+
+        done_slugs = []
+
+        matches = re.findall(pattern_instagram, message.content)
+        for match in matches:
+            print(f"Message from {message.author.name}")
+
+            full_url = match  # entire URL
+            full_url = full_url.replace("instagram.com", "ddinstagram.com")  # Transform to ddinstagram.com
+
+            slug = full_url.split('/')[-1]  # Extract the slug (last part of the URL)
+
+            if slug in done_slugs:
+                continue
+
+            async with message.channel.typing():
+                done_slugs.append(slug)
+
+                print(f"Found an Instagram post link: {full_url}, Slug: {slug}")
+                await message.channel.send(full_url)
+
+                should_remove_embeds = True
+
+
         pattern_twitter = r"https://(?:www\.)?twitter\.com/[A-Za-z0-9_]+/status/\d+"
         pattern_x = r"https://(?:www\.)?x\.com/[A-Za-z0-9_]+/status/\d+"
         combined_pattern = f"({pattern_twitter})|({pattern_x})"
